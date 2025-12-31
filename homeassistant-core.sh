@@ -1,165 +1,248 @@
 #!/usr/bin/env bash
-source <(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/build.func)
-# Copyright (c) 2021-2025 community-scripts ORG
-# Author: tteck (tteckster) | Co-Author: MickLesk (CanbiZ)
-# License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
-# Source: https://www.home-assistant.io/
+set -Eeuo pipefail
 
-APP="Home Assistant-Core"
-var_tags="${var_tags:-automation;smarthome}"
-var_cpu="${var_cpu:-8}"
-var_ram="${var_ram:-8192}"
-var_disk="${var_disk:-32}"
-var_os="${var_os:-debian}"
-var_version="${var_version:-13}"
-var_unprivileged="${var_unprivileged:-0}"
+#############################################
+# Home Assistant Core on Debian 13 (LXC)
+# - Proxmox-host mode: create CT + install
+# - In-container mode: install + systemd unit
+#############################################
 
-header_info "$APP"
-variables
-color
-catch_errors
+log() { printf '%s\n' "$*"; }
+die() { log "ERROR: $*"; exit 1; }
 
-function update_script() {
-  header_info
-  if ! lsb_release -d | grep -q "Ubuntu 24.10"; then
-    msg_error "Wrong OS detected. This script only supports Ubuntu 24.10."
-    msg_error "Read Guide: https://github.com/community-scripts/ProxmoxVE/discussions/1549"
-    exit 1
-  fi
-  check_container_storage
-  check_container_resources
-  if [[ ! -d /srv/homeassistant ]]; then
-    msg_error "No ${APP} Installation Found!"
-    exit 1
-  fi
-  setup_uv
-  IP=$(hostname -I | awk '{print $1}')
-  UPD=$(whiptail --backtitle "Proxmox VE Helper Scripts" --title "UPDATE" --radiolist --cancel-button Exit-Script "Spacebar = Select" 11 58 4 \
-    "1" "Update Core" ON \
-    "2" "Install HACS" OFF \
-    "3" "Install FileBrowser" OFF \
-    3>&1 1>&2 2>&3)
+need_cmd() { command -v "$1" >/dev/null 2>&1 || die "Missing command: $1"; }
 
-  if [ "$UPD" == "1" ]; then
-    if (whiptail --backtitle "Proxmox VE Helper Scripts" --defaultno --title "SELECT BRANCH" --yesno "Use Beta Branch?" 10 58); then
-      clear
-      header_info
-      echo -e "${GN}Updating to Beta Version${CL}"
-      BR="--pre"
-    else
-      clear
-      header_info
-      echo -e "${GN}Updating to Stable Version${CL}"
-      BR=""
-    fi
+is_proxmox_host() {
+  [[ -d /etc/pve ]] && command -v pct >/dev/null 2>&1
+}
 
-    msg_info "Stopping Home Assistant"
-    systemctl stop homeassistant
-    msg_ok "Stopped Home Assistant"
+# -------- Config (override via env vars) --------
+CTID="${CTID:-}"
+HOSTNAME_CT="${HOSTNAME_CT:-homeassistant-core}"
+CORES="${CORES:-4}"
+RAM_MB="${RAM_MB:-4096}"
+DISK_GB="${DISK_GB:-32}"
+BRIDGE="${BRIDGE:-vmbr0}"
+IPCFG="${IPCFG:-dhcp}"   # e.g. "dhcp" or "192.168.1.50/24,gw=192.168.1.1"
+UNPRIVILEGED="${UNPRIVILEGED:-0}"  # 0=privileged, 1=unprivileged
+ONBOOT="${ONBOOT:-1}"
+TIMEZONE="${TIMEZONE:-host}"
 
-    if [[ -d /srv/homeassistant/bin ]]; then
-      msg_info "Migrating to .venv-based structure"
-      $STD source /srv/homeassistant/bin/activate
-      PY_VER=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
-      $STD deactivate
-      mv /srv/homeassistant "/srv/homeassistant_backup_$PY_VER"
-      mkdir -p /srv/homeassistant
-      cd /srv/homeassistant
+# Install paths
+HA_USER="${HA_USER:-homeassistant}"
+HA_GROUP="${HA_GROUP:-homeassistant}"
+HA_BASE="${HA_BASE:-/srv/homeassistant}"
+HA_VENV="${HA_VENV:-/srv/homeassistant/.venv}"
+HA_CONFIG="${HA_CONFIG:-/var/lib/homeassistant}"
 
-      $STD uv python install 3.13
-      UV_PYTHON=$(uv python list | awk '/3\.13\.[0-9]+.*\/root\/.local/ {print $2; exit}')
-      if [[ -z "$UV_PYTHON" ]]; then
-        msg_error "No local Python 3.13 found via uv"
-        exit 1
-      fi
+# -------- In-container installer --------
+install_inside_container() {
+  log "==> Installing Home Assistant Core (venv) + systemd service on Debian"
 
-      $STD uv venv .venv --python "$UV_PYTHON"
-      $STD source .venv/bin/activate
-      $STD uv pip install homeassistant mysqlclient psycopg2-binary isal webrtcvad wheel
-      mkdir -p /root/.homeassistant
-      msg_ok "Migration complete"
-    else
-      source /srv/homeassistant/.venv/bin/activate
-    fi
+  need_cmd apt-get
+  need_cmd systemctl
+  need_cmd python3
 
-    msg_info "Updating Home Assistant"
-    $STD uv pip install $BR --upgrade homeassistant
-    msg_ok "Updated Home Assistant"
-
-    msg_info "Starting Home Assistant"
-    if [[ -f /etc/systemd/system/homeassistant.service ]] && grep -q "/srv/homeassistant/bin/python3" /etc/systemd/system/homeassistant.service; then
-      sed -i 's|ExecStart=/srv/homeassistant/bin/python3|ExecStart=/srv/homeassistant/.venv/bin/python3|' /etc/systemd/system/homeassistant.service
-      sed -i 's|PATH=/srv/homeassistant/bin|PATH=/srv/homeassistant/.venv/bin|' /etc/systemd/system/homeassistant.service
-      $STD systemctl daemon-reload
-    fi
-
-    systemctl start homeassistant
-    sleep 5
-    msg_ok "Started Home Assistant"
-    msg_ok "Update Successful"
-    echo -e "${TAB}${GATEWAY}${BGN}http://${IP}:8123${CL}"
-    exit
+  local py_mm
+  py_mm="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+  if [[ "$py_mm" != "3.13" ]]; then
+    die "python3 is $py_mm, expected 3.13 (Debian 13)."
   fi
 
-  if [ "$UPD" == "2" ]; then
-    msg_info "Installing Home Assistant Community Store (HACS)"
-    $STD apt update
-    cd /root/.homeassistant
-    $STD bash <(curl -fsSL https://get.hacs.xyz)
-    msg_ok "Installed Home Assistant Community Store (HACS)"
-    echo -e "\n Reboot Home Assistant and clear browser cache then Add HACS integration.\n"
-    exit
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -y
+
+  # Core build + HA common deps (close to the historical helper script, updated for Debian 13)
+  apt-get install -y --no-install-recommends \
+    ca-certificates curl git sudo mc \
+    python3 python3-venv python3-pip python3-dev \
+    build-essential autoconf pkg-config \
+    libffi-dev libssl-dev libjpeg-dev zlib1g-dev \
+    libopenjp2-7 libturbojpeg0-dev \
+    ffmpeg \
+    liblapack3 liblapack-dev libatlas-base-dev \
+    libpcap-dev \
+    libavdevice-dev libavformat-dev libavcodec-dev libavutil-dev libavfilter-dev \
+    libmariadb-dev-compat libmariadb-dev \
+    dbus-broker \
+    bluez
+
+  # Create service user (idempotent)
+  if ! id -u "$HA_USER" >/dev/null 2>&1; then
+    useradd --system --create-home --home-dir "$HA_CONFIG" --shell /usr/sbin/nologin "$HA_USER"
+  fi
+  mkdir -p "$HA_BASE" "$HA_CONFIG"
+  chown -R "$HA_USER:$HA_GROUP" "$HA_BASE" "$HA_CONFIG" || true
+
+  # Helpful compatibility symlink for people expecting /root/.homeassistant
+  mkdir -p /root
+  ln -sfn "$HA_CONFIG" /root/.homeassistant
+
+  # Create venv (idempotent)
+  if [[ ! -x "${HA_VENV}/bin/python" ]]; then
+    log "==> Creating venv at ${HA_VENV}"
+    python3 -m venv "$HA_VENV"
+    chown -R "$HA_USER:$HA_GROUP" "$HA_VENV" || true
   fi
 
-  if [ "$UPD" == "3" ]; then
-    set +Eeuo pipefail
-    read -r -p "${TAB3}Would you like to use No Authentication? <y/N> " prompt
-    msg_info "Installing FileBrowser"
-    RELEASE=$(curl -fsSL https://api.github.com/repos/filebrowser/filebrowser/releases/latest | grep -o '"tag_name": ".*"' | sed 's/"//g' | sed 's/tag_name: //g')
-    $STD curl -fsSL https://github.com/filebrowser/filebrowser/releases/download/$RELEASE/linux-amd64-filebrowser.tar.gz | tar -xzv -C /usr/local/bin
+  # Install HA
+  log "==> Installing Home Assistant Core into venv"
+  sudo -u "$HA_USER" -H "${HA_VENV}/bin/python" -m pip install --upgrade pip setuptools wheel
+  sudo -u "$HA_USER" -H "${HA_VENV}/bin/pip" install --prefer-binary \
+    homeassistant \
+    mysqlclient psycopg2-binary isal webrtcvad
 
-    if [[ "${prompt,,}" =~ ^(y|yes)$ ]]; then
-      $STD filebrowser config init -a '0.0.0.0'
-      $STD filebrowser config set -a '0.0.0.0'
-      $STD filebrowser config set --auth.method=noauth
-      $STD filebrowser users add ID 1 --perm.admin
-    else
-      $STD filebrowser config init -a '0.0.0.0'
-      $STD filebrowser config set -a '0.0.0.0'
-      $STD filebrowser users add admin helper-scripts.com --perm.admin
-    fi
-    msg_ok "Installed FileBrowser"
-
-    msg_info "Creating Service"
-    cat <<EOF >/etc/systemd/system/filebrowser.service
+  # Systemd unit
+  log "==> Creating /etc/systemd/system/homeassistant.service"
+  cat >/etc/systemd/system/homeassistant.service <<EOF
 [Unit]
-Description=Filebrowser
+Description=Home Assistant Core
+Wants=network-online.target
 After=network-online.target
 
 [Service]
-User=root
-WorkingDirectory=/root/
-ExecStart=/usr/local/bin/filebrowser -r /root/.homeassistant
+Type=simple
+User=${HA_USER}
+Group=${HA_GROUP}
+WorkingDirectory=${HA_CONFIG}
+Environment="PATH=${HA_VENV}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+ExecStart=${HA_VENV}/bin/python -m homeassistant --config ${HA_CONFIG}
+Restart=on-failure
+RestartSec=5s
 
 [Install]
-WantedBy=default.target
+WantedBy=multi-user.target
 EOF
 
-    systemctl enable --now -q filebrowser.service
-    msg_ok "Created Service"
+  systemctl daemon-reload
+  systemctl enable --now homeassistant
 
-    msg_ok "Completed Successfully!\n"
-    echo -e "FileBrowser should be reachable by going to the following URL.
-         ${BL}http://$IP:8080${CL}   admin|helper-scripts.com\n"
-    exit
+  log "==> Installed. Check status with: systemctl status homeassistant -l --no-pager"
+  log "==> Logs: journalctl -u homeassistant -f"
+}
+
+# -------- Proxmox host mode: create CT + run installer --------
+pick_storage() {
+  local content="$1"
+  # First available storage that supports given content type
+  pvesm status -content "$content" 2>/dev/null | awk 'NR>1 {print $1; exit}'
+}
+
+pick_debian13_template() {
+  pveam update >/dev/null 2>&1 || true
+  pveam available -section system 2>/dev/null | awk '/debian-13-standard_.*amd64/ {print $2}' | tail -n 1
+}
+
+next_ctid() {
+  if command -v pvesh >/dev/null 2>&1; then
+    pvesh get /cluster/nextid 2>/dev/null || true
+  fi
+  return 0
+}
+
+create_and_install_on_proxmox() {
+  need_cmd pct
+  need_cmd pveam
+  need_cmd pvesm
+  need_cmd awk
+
+  local tmpl_storage root_storage template
+  tmpl_storage="$(pick_storage vztmpl)"
+  root_storage="$(pick_storage rootdir)"
+  [[ -n "$tmpl_storage" ]] || die "No storage found for templates (vztmpl)."
+  [[ -n "$root_storage" ]] || die "No storage found for containers (rootdir)."
+
+  template="$(pick_debian13_template)"
+  [[ -n "$template" ]] || die "Could not find a Debian 13 template via pveam."
+
+  if [[ -z "${CTID}" ]]; then
+    CTID="$(next_ctid)"
+  fi
+  [[ -n "${CTID}" ]] || die "CTID not set and could not auto-detect. Set CTID=#### and retry."
+
+  log "==> Using template: ${template}"
+  log "==> Template storage: ${tmpl_storage}, Rootfs storage: ${root_storage}"
+  log "==> Creating CTID: ${CTID} (hostname: ${HOSTNAME_CT})"
+
+  # Ensure template downloaded
+  if ! pveam list "$tmpl_storage" | awk '{print $1}' | grep -qx "$template"; then
+    log "==> Downloading template to ${tmpl_storage}..."
+    pveam download "$tmpl_storage" "$template"
+  fi
+
+  # Root password: random unless provided
+  local CT_PASSWORD="${CT_PASSWORD:-}"
+  if [[ -z "$CT_PASSWORD" ]]; then
+    need_cmd openssl
+    CT_PASSWORD="$(openssl rand -base64 18 | tr -d '/+=' | cut -c1-20)"
+  fi
+  local pwfile
+  pwfile="$(mktemp)"
+  printf '%s\n' "$CT_PASSWORD" >"$pwfile"
+
+  # Network string
+  local net0="name=eth0,bridge=${BRIDGE},ip=${IPCFG}"
+  if [[ "$IPCFG" != "dhcp" && "$IPCFG" == *",gw="* ]]; then
+    # Convert "ip/cidr,gw=x" to pct syntax: ip=...,gw=...
+    local ip_part gw_part
+    ip_part="${IPCFG%%,gw=*}"
+    gw_part="${IPCFG##*,gw=}"
+    net0="name=eth0,bridge=${BRIDGE},ip=${ip_part},gw=${gw_part}"
+  fi
+
+  # Create CT
+  pct create "$CTID" "${tmpl_storage}:vztmpl/${template}" \
+    --ostype debian \
+    --arch amd64 \
+    --hostname "$HOSTNAME_CT" \
+    --cores "$CORES" \
+    --memory "$RAM_MB" \
+    --swap 0 \
+    --rootfs "${root_storage}:${DISK_GB}" \
+    --net0 "$net0" \
+    --features nesting=1,keyctl=1 \
+    --unprivileged "$UNPRIVILEGED" \
+    --onboot "$ONBOOT" \
+    --timezone "$TIMEZONE" \
+    --password-file "$pwfile"
+
+  rm -f "$pwfile"
+
+  log "==> Starting CT ${CTID}"
+  pct start "$CTID"
+
+  log "==> Running in-container installer"
+  pct exec "$CTID" -- bash -lc "$(declare -f log die need_cmd install_inside_container); install_inside_container"
+
+  local ip
+  ip="$(pct exec "$CTID" -- bash -lc "hostname -I | awk '{print \$1}'" 2>/dev/null || true)"
+  log "==> Done."
+  log "==> CTID: ${CTID}"
+  log "==> Root password: ${CT_PASSWORD}"
+  if [[ -n "$ip" ]]; then
+    log "==> Home Assistant URL: http://${ip}:8123"
+  else
+    log "==> Home Assistant URL: http://<ct-ip>:8123"
   fi
 }
 
-start
-build_container
-description
+main() {
+  case "${1:-}" in
+    --install-only)
+      install_inside_container
+      ;;
+    --proxmox|--create-ct|"")
+      if is_proxmox_host; then
+        create_and_install_on_proxmox
+      else
+        # If not on Proxmox host, default to in-container install
+        install_inside_container
+      fi
+      ;;
+    *)
+      die "Unknown argument: $1 (use --proxmox, --create-ct, or --install-only)"
+      ;;
+  esac
+}
 
-msg_ok "Completed Successfully!\n"
-echo -e "${CREATING}${GN}${APP} setup has been successfully initialized!${CL}"
-echo -e "${INFO}${YW} Access it using the following URL:${CL}"
-echo -e "${TAB}${GATEWAY}${BGN}http://${IP}:8123${CL}"
+main "$@"
