@@ -2,8 +2,11 @@
 source <(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/build.func)
 # Copyright (c) 2021-2025 community-scripts ORG
 # Author: tteck (tteckster) | Co-Author: MickLesk (CanbiZ)
+# Modified by: pomianowski (2025-12-31)
 # License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
 # Source: https://www.home-assistant.io/
+# Note: Home Assistant Core (venv) installation is DEPRECATED by official HA project. 
+#       This script is provided for advanced users who understand the risks. 
 
 APP="Home Assistant-Core"
 var_tags="${var_tags:-automation;smarthome}"
@@ -14,6 +17,11 @@ var_os="${var_os:-debian}"
 var_version="${var_version:-13}"
 var_unprivileged="${var_unprivileged:-0}"
 
+# Override the install script location to use your own hosted version
+# Change this URL to point to your own repository/gist
+var_install="homeassistant-core-install"
+INSTALL_SCRIPT_URL="https://raw.githubusercontent.com/pomianowski/proxmox/main/homeassistant-core-install.sh"
+
 header_info "$APP"
 variables
 color
@@ -21,9 +29,9 @@ catch_errors
 
 function update_script() {
   header_info
-  if ! lsb_release -d | grep -q "Ubuntu 24.10"; then
-    msg_error "Wrong OS detected. This script only supports Ubuntu 24.10."
-    msg_error "Read Guide: https://github.com/community-scripts/ProxmoxVE/discussions/1549"
+  # Fixed: Check for Debian 13, not Ubuntu 24.10
+  if !  grep -q "VERSION_ID=\"13\"" /etc/os-release || ! grep -q "ID=debian" /etc/os-release; then
+    msg_error "Wrong OS detected. This script requires Debian 13 (Trixie)."
     exit 1
   fi
   check_container_storage
@@ -57,7 +65,8 @@ function update_script() {
     systemctl stop homeassistant
     msg_ok "Stopped Home Assistant"
 
-    if [[ -d /srv/homeassistant/bin ]]; then
+    # Handle migration from old venv structure (bin/) to new structure (.venv/)
+    if [[ -d /srv/homeassistant/bin && !  -d /srv/homeassistant/.venv ]]; then
       msg_info "Migrating to .venv-based structure"
       $STD source /srv/homeassistant/bin/activate
       PY_VER=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
@@ -87,6 +96,7 @@ function update_script() {
     msg_ok "Updated Home Assistant"
 
     msg_info "Starting Home Assistant"
+    # Update systemd service paths if migrated
     if [[ -f /etc/systemd/system/homeassistant.service ]] && grep -q "/srv/homeassistant/bin/python3" /etc/systemd/system/homeassistant.service; then
       sed -i 's|ExecStart=/srv/homeassistant/bin/python3|ExecStart=/srv/homeassistant/.venv/bin/python3|' /etc/systemd/system/homeassistant.service
       sed -i 's|PATH=/srv/homeassistant/bin|PATH=/srv/homeassistant/.venv/bin|' /etc/systemd/system/homeassistant.service
