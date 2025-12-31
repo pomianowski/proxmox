@@ -204,10 +204,6 @@ $STD apt-get install -y \
   software-properties-common \
   libmariadb-dev \
   pkg-config \
-  socat \
-  nmap \
-  net-tools \
-  openssh-client \
   curl
 msg_ok "Installed Dependencies"
 
@@ -221,7 +217,7 @@ msg_ok "Setup Python3"
 
 msg_info "Preparing Python 3.13 for uv"
 $STD uv python install 3.13
-UV_PYTHON=$(uv python list | awk '/3\.13\.[0-9]+.*\/root\/. local/ {print $2; exit}')
+UV_PYTHON=$(uv python list | awk '/3\.13\.[0-9]+.*\/root\/.local/ {print $2; exit}')
 if [[ -z "$UV_PYTHON" ]]; then
   msg_error "No local Python 3.13 found via uv"
   exit 1
@@ -237,15 +233,9 @@ source .venv/bin/activate
 msg_ok "Created virtual environment"
 
 msg_info "Installing Home Assistant-Core"
-$STD uv pip install homeassistant mysqlclient psycopg2-binary isal webrtcvad wheel Brotli faust-cchardet
+$STD uv pip install homeassistant mysqlclient psycopg2-binary isal webrtcvad wheel
 mkdir -p /root/.homeassistant
 msg_ok "Installed Home Assistant-Core"
-
-msg_info "Installing Go2RTC"
-LATEST_GO2RTC=$(curl -fsSL https://api.github.com/repos/AlexxIT/go2rtc/releases/latest | grep -o '"tag_name": "[^"]*"' | cut -d'"' -f4)
-$STD curl -fsSL "https://github.com/AlexxIT/go2rtc/releases/download/${LATEST_GO2RTC}/go2rtc_linux_amd64" -o /usr/local/bin/go2rtc
-chmod +x /usr/local/bin/go2rtc
-msg_ok "Installed Go2RTC"
 
 msg_info "Creating Service"
 cat <<EOF >/etc/systemd/system/homeassistant.service
