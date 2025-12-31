@@ -272,7 +272,7 @@ INSTALL_SCRIPT
 var_install="CUSTOM_EMBEDDED"
 
 # Monkey-patch the build_container function to use our embedded install script
-eval "$(declare -f build_container | sed 's|curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/install/\${var_install}.sh|bash -c "$(custom_install)"|g')"
+eval "$(declare -f build_container | sed 's|curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/install/\${var_install}.sh|bash -c \"\$(custom_install)\"|g')"
 
 start
 build_container

@@ -70,23 +70,23 @@ rm -rf /srv/homeassistant
 mkdir -p /srv/homeassistant
 cd /srv/homeassistant
 $STD uv venv .venv --python "$UV_PYTHON"
-source . venv/bin/activate
+source .venv/bin/activate
 msg_ok "Created virtual environment"
 
 msg_info "Installing Home Assistant-Core"
 $STD uv pip install homeassistant mysqlclient psycopg2-binary isal webrtcvad wheel
-mkdir -p /root/. homeassistant
+mkdir -p /root/.homeassistant
 msg_ok "Installed Home Assistant-Core"
 
 msg_info "Creating Service"
-cat <<EOF >/etc/systemd/system/homeassistant. service
+cat <<EOF >/etc/systemd/system/homeassistant.service
 [Unit]
 Description=Home Assistant
 After=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/root/. homeassistant
+WorkingDirectory=/root/.homeassistant
 Environment="PATH=/srv/homeassistant/.venv/bin:/usr/local/bin:/usr/bin"
 ExecStart=/srv/homeassistant/.venv/bin/python3 -m homeassistant --config /root/.homeassistant
 Restart=always
