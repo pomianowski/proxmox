@@ -28,13 +28,13 @@ catch_errors
 
 function update_script() {
   header_info
-  if !  grep -q "VERSION_ID=\"13\"" /etc/os-release || ! grep -q "ID=debian" /etc/os-release; then
+  if ! grep -q "VERSION_ID=\"13\"" /etc/os-release || ! grep -q "ID=debian" /etc/os-release; then
     msg_error "Wrong OS detected. This script requires Debian 13 (Trixie)."
     exit 1
   fi
   check_container_storage
   check_container_resources
-  if [[ !  -d /srv/homeassistant ]]; then
+  if [[ ! -d /srv/homeassistant ]]; then
     msg_error "No ${APP} Installation Found!"
     exit 1
   fi
@@ -63,10 +63,10 @@ function update_script() {
     systemctl stop homeassistant
     msg_ok "Stopped Home Assistant"
 
-    if [[ -d /srv/homeassistant/bin && !  -d /srv/homeassistant/. venv ]]; then
-      msg_info "Migrating to . venv-based structure"
+    if [[ -d /srv/homeassistant/bin && ! -d /srv/homeassistant/.venv ]]; then
+      msg_info "Migrating to .venv-based structure"
       $STD source /srv/homeassistant/bin/activate
-      PY_VER=$(python3 -c "import sys; print(f'{sys.version_info. major}.{sys. version_info.minor}')")
+      PY_VER=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
       $STD deactivate
       mv /srv/homeassistant "/srv/homeassistant_backup_$PY_VER"
       mkdir -p /srv/homeassistant
@@ -85,7 +85,7 @@ function update_script() {
       mkdir -p /root/.homeassistant
       msg_ok "Migration complete"
     else
-      source /srv/homeassistant/. venv/bin/activate
+      source /srv/homeassistant/.venv/bin/activate
     fi
 
     msg_info "Updating Home Assistant"
@@ -95,7 +95,7 @@ function update_script() {
     msg_info "Starting Home Assistant"
     if [[ -f /etc/systemd/system/homeassistant.service ]] && grep -q "/srv/homeassistant/bin/python3" /etc/systemd/system/homeassistant.service; then
       sed -i 's|ExecStart=/srv/homeassistant/bin/python3|ExecStart=/srv/homeassistant/.venv/bin/python3|' /etc/systemd/system/homeassistant.service
-      sed -i 's|PATH=/srv/homeassistant/bin|PATH=/srv/homeassistant/. venv/bin|' /etc/systemd/system/homeassistant.service
+      sed -i 's|PATH=/srv/homeassistant/bin|PATH=/srv/homeassistant/.venv/bin|' /etc/systemd/system/homeassistant.service
       $STD systemctl daemon-reload
     fi
 
@@ -127,7 +127,7 @@ function update_script() {
     if [[ "${prompt,,}" =~ ^(y|yes)$ ]]; then
       $STD filebrowser config init -a '0.0.0.0'
       $STD filebrowser config set -a '0.0.0.0'
-      $STD filebrowser config set --auth. method=noauth
+      $STD filebrowser config set --auth.method=noauth
       $STD filebrowser users add ID 1 --perm.admin
     else
       $STD filebrowser config init -a '0.0.0.0'
@@ -140,12 +140,12 @@ function update_script() {
     cat <<EOF >/etc/systemd/system/filebrowser.service
 [Unit]
 Description=Filebrowser
-After=network-online. target
+After=network-online.target
 
 [Service]
 User=root
 WorkingDirectory=/root/
-ExecStart=/usr/local/bin/filebrowser -r /root/. homeassistant
+ExecStart=/usr/local/bin/filebrowser -r /root/.homeassistant
 
 [Install]
 WantedBy=default.target
@@ -203,7 +203,8 @@ $STD apt-get install -y \
   libatlas-base-dev \
   software-properties-common \
   libmariadb-dev \
-  pkg-config
+  pkg-config \
+  curl
 msg_ok "Installed Dependencies"
 
 setup_uv
@@ -216,7 +217,7 @@ msg_ok "Setup Python3"
 
 msg_info "Preparing Python 3.13 for uv"
 $STD uv python install 3.13
-UV_PYTHON=$(uv python list | awk '/3\.13\.[0-9]+.*\/root\/. local/ {print $2; exit}')
+UV_PYTHON=$(uv python list | awk '/3\.13\.[0-9]+.*\/root\/.local/ {print $2; exit}')
 if [[ -z "$UV_PYTHON" ]]; then
   msg_error "No local Python 3.13 found via uv"
   exit 1
@@ -228,12 +229,12 @@ rm -rf /srv/homeassistant
 mkdir -p /srv/homeassistant
 cd /srv/homeassistant
 $STD uv venv .venv --python "$UV_PYTHON"
-source . venv/bin/activate
+source .venv/bin/activate
 msg_ok "Created virtual environment"
 
 msg_info "Installing Home Assistant-Core"
 $STD uv pip install homeassistant mysqlclient psycopg2-binary isal webrtcvad wheel
-mkdir -p /root/. homeassistant
+mkdir -p /root/.homeassistant
 msg_ok "Installed Home Assistant-Core"
 
 msg_info "Creating Service"
@@ -244,8 +245,8 @@ After=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/root/. homeassistant
-Environment="PATH=/srv/homeassistant/. venv/bin:/usr/local/bin:/usr/bin"
+WorkingDirectory=/root/.homeassistant
+Environment="PATH=/srv/homeassistant/.venv/bin:/usr/local/bin:/usr/bin"
 ExecStart=/srv/homeassistant/.venv/bin/python3 -m homeassistant --config /root/.homeassistant
 Restart=always
 RestartForceExitStatus=100
@@ -271,7 +272,7 @@ INSTALL_SCRIPT
 var_install="CUSTOM_EMBEDDED"
 
 # Monkey-patch the build_container function to use our embedded install script
-eval "$(declare -f build_container | sed 's|curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/install/\${var_install}. sh|curl -fsSL https://raw.githubusercontent.com/pomianowski/proxmox/main/homeassistant-core-install.sh|g')"
+eval "$(declare -f build_container | sed 's|curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/install/\${var_install}.sh|bash -c \"\$(custom_install)\"|g')"
 
 start
 build_container
